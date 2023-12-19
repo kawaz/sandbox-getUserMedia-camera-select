@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="utf-8">
+</head>
+
+<body>
+    <div>TS</div>
+    <div>FILESIZE bytes</div>
+    <div>あいうえお</div>
+    <div>
+        <div><video id="videoElement" autoplay muted style="border:1px;background-color: gray;"></video></div>
+        <select id="videoSelect">
+            <option>NO DEVICE</option>
+        </select>
+    </div>
+    <textarea id="output" style="width:90vw; height: 1000vh;"></textarea>
+</body>
+<script>
+    // ホットリロード用
+    ws = new WebSocket(`${location.protocol.replace(/^http/, 'ws')}//${location.hostname}:${location.port}`)
+    ws.onmessage = e => {
+        if (e.data === "hotreload") { location.reload() }
+        console.log("ws.onmessage", e.data)
+    }
+    // ここからテストコード
+
+
+    const main = async () => {
+        // 一度だけ実行される
+        if (typeof main.alreadyCalled === "undefined") {
+            main.alreadyCalled = true
+        } else {
+            out('mianの実行は一度だけです')
+            return
+        }
+        // ビデオステータスを保持しておくオブジェクト
+        const videoState = {
+            /** @type {MediaDeviceInfo[]} */
+            videoDevices: [],
+            /** @type {MediaDeviceInfo | null} */
+            currentDevice: null,
+            /** @type {MediaStream | null} */
+            currentStream: null,
+            /** @type {Omit<HTMLVideoElement, keyof HTMLElement>} */
+            videoElement: document.querySelector("video[id=videoElement]"),
+            /** @type {HTMLSelectElement} */
+            selectElement: document.querySelector("select[id=videoSelect]"),
+        }
+        window.videoState = videoState //DEBUG
+
+        // select の change イベントでカメラを切り替える
+        videoState.selectElement.addEventListener("change", ()=>changeCurrentDevice(videoState.selectElement.value))
+        // デバッグ用関数
+        const out = (...msgs) => document.querySelector("#output").value += `${msgs.map(m => typeof m === "object" ? JSON.stringify(m, null, "  ") : m).join(" ")}\n`
+
+        // DEBUG getUserMedia の検索に使用可能な制約
+        // out("supportedConstraints", navigator.mediaDevices.getSupportedConstraints())
+
+        // DEBUG 現在のカメラパーミッションを確認
+        // navigator.permissions.query({ name: "camera" }).then(p => out('cameraPermission', { name: p.name, state: p.state }))
+        // DEBUG カメラパーミッションの変更イベントを監視
+        navigator.permissions.query({ name: "camera" }).then(p => p.addEventListener("change", e => out('cameraPermission on:change', e)))
+        // DEBUG メディアデバイスの変更イベントを監視
+        navigator.mediaDevices.addEventListener("devicechange", e => out("mediaDevices on:devicechange", e))
+        // ユーティリティ関数等（APIの動作確認のために作っただけで今回の処理では使わない）
+        {
+            // getUserMediaでサポートされている制約一覧を取得する
+            const getSupportedConstraints = navigator.mediaDevices.getSupportedConstraints()
+            // サポートされてる全てのパーミッションステートを取得する
+            const getPermissions = async () => {
+                const permissionNames = [...new Set([].concat([
+                    // Chrome https://chromium.googlesource.com/chromium/src/+/refs/heads/main/third_party/blink/renderer/modules/permissions/permission_descriptor.idl
+                    ...["geolocation", "notifications", "push", "midi", "camera", "microphone", "background-fetch", "background-sync", "persistent-storage", "ambient-light-sensor", "accelerometer", "gyroscope", "magnetometer", "screen-wake-lock", "nfc", "display-capture", "accessibility-events", "clipboard-read", "clipboard-write", "payment-handler", "idle-detection", "periodic-background-sync", "system-wake-lock", "storage-access", "window-management", "window-placement", "local-fonts", "top-level-storage-access", "captured-surface-control",],
+                    ...["speaker", "device-info", "bluetooth", "clipboard",],
+                    // Firefox https://searchfox.org/mozilla-central/source/dom/webidl/Permissions.webidl#10
+                    ...["geolocation", "notifications", "push", "persistent-storage", "midi", "storage-access", "screen-wake-lock"],
+                    // WebKit https://github.com/WebKit/WebKit/blob/main/Source/WebCore/Modules/permissions/PermissionName.idl
+                    ...["accelerometer", "background-fetch", "bluetooth", "camera", "display-capture", "geolocation", "gyroscope", "magnetometer", "microphone", "midi", "nfc", "notifications", "push", "screen-wake-lock", "speaker-selection",],
+                ])).values()].sort()
+                return Object.fromEntries(
+                    await Promise.allSettled(permissionNames.map(name => navigator.permissions.query(({ name })))).then(ss => ss
+                        .map((settled, i) => ({ name: permissionNames[i], ...settled }))
+                        .filter(v => v.status === "fulfilled")
+                        .map(v => [v.name, v.value.state])))
+            }
+            const getPermission = name => navigator.permissions.query({ name }).catch(() => null)
+            const getPermissionState = name => navigator.permissions.query({ name }).then(p => p.state).catch(() => null)
+            const isPermissionGranted = name => getPermissionState(name).then(s => s === "granted")
+            const isPermissionDenied = name => getPermissionState(name).then(s => s === "denied")
+            const isPermissionPrompt = name => getPermissionState(name).then(s => s === "prompt")
+            const isPermissionSupported = name => getPermission.then(p => p != null)
+            const addPermissionChangeListener = (name, listener) => navigator.permissions.query({ name }).then(p => p.onchange = listener).catch(() => { })
+        }
+
+        const changeCurrentDevice = (deviceId) => {
+            const matchDevices = videoState.videoDevices.filter(dev => dev.deviceId === deviceId)
+            if(matchDevices.length == 0) {
+                return out("changeCurrentDevice error: device is null", {deviceId, devices:videoState.videoDevices})
+            }
+            const device = matchDevices[0]
+            videoState.currentDevice = device
+            videoState.videoDevices.sort((a,b)=>b.label < a.label)
+            // セレクタを更新する
+            updateSelectOptions()
+            // videoタグのストリームを更新する
+            const mediaConstraints = deviceId ? { video: { deviceId } } : { video: { facingMode: "user" } }
+            navigator.mediaDevices.getUserMedia(mediaConstraints)
+                .then(stream => {
+                    const {id, active} = stream
+                    videoState.videoElement.srcObject = stream
+                })
+                .catch(err => out("getUserMedia error", err.message))
+        }
+        const updateSelectOptions = () => {
+            const { videoDevices, currentDevice: { deviceId }, selectElement } = videoState
+            if (videoDevices.length == 0) {
+                selectElement.innerHTML = `<option>NO DEVICE</option>`
+                return
+            }
+            selectElement.innerHTML = ''
+            for (const dev of videoDevices) {
+                selectElement.appendChild(Object.assign(document.createElement("option"), {
+                    value: dev.deviceId,
+                    textContent: dev.label
+                }))
+            }
+            selectElement.value = deviceId
+        }
+        const refreshVideoDevices = (event) => {
+            navigator.mediaDevices.enumerateDevices()
+                .catch(err => out("refreshVideoDevices err", err.message))
+                .then(devices => {
+                    const videoDevices = devices.filter(device => device.kind === "videoinput")
+                    videoState.videoDevices = videoDevices
+                    // カレントデバイスが未選択なら先頭のカメラを使用
+                    if (videoDevices.length) {
+                        changeCurrentDevice(videoDevices[0].deviceId)
+                    }
+                })
+        }
+        // デバイスリストはパーミッションが granted でない時点では正しく取得できないので、パーミッション変更とメディアデバイス変更のイベント時に再実行する
+        navigator.permissions.query({ name: "camera" }).then(p => p.addEventListener("change", refreshVideoDevices))
+        navigator.mediaDevices.addEventListener("devicechange", refreshVideoDevices)
+        // 初回実行
+        refreshVideoDevices()
+    }
+    main()
+</script>
+
+
+
+</html>
