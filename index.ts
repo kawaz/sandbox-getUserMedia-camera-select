@@ -1,6 +1,6 @@
-import indexFile from './public/index.txt'
+import indexFile from './public/index.html.txt'
 
-const text = await Bun.file("./public/index.txt").text()
+const text = await Bun.file("./public/index.html.txt").text()
 const server = Bun.serve({
     port: 3000,
     async fetch(req) {
